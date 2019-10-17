@@ -122,13 +122,19 @@ RELEASE_BUCKET=${FLAGS_bucket:-"kubernetes-release-dev"}
 # This will canonicalize the path
 KUBE_ROOT=$(pwd -P)
 
+if [[ ! -f /.dockerenv ]]; then
+  OUTPUT_ROOT="_output/dockerized"
+else
+  OUTPUT_ROOT="_output"
+fi
+
 USE_BAZEL=false
 if release::was_built_with_bazel $KUBE_ROOT $FLAGS_release_kind; then
   USE_BAZEL=true
   bazel build //:version
   LATEST=$(cat $KUBE_ROOT/bazel-genfiles/version)
 else
-  LATEST=$(tar -O -xzf $KUBE_ROOT/_output/release-tars/$FLAGS_release_kind.tar.gz $FLAGS_release_kind/version)
+  LATEST=$(tar -O -xzf $KUBE_ROOT/$OUTPUT_ROOT/release-tars/$FLAGS_release_kind.tar.gz $FLAGS_release_kind/version)
 fi
 
 if [[ "$LATEST" =~ (${VER_REGEX[release]}(\.${VER_REGEX[build]})?(-dirty)?) ]]; then
@@ -195,14 +201,14 @@ common::stepheader COPY RELEASE ARTIFACTS
 attempt=0
 while ((attempt<max_attempts)); do
   if $USE_BAZEL; then
-    release::gcs::bazel_push_build $GCS_DEST $LATEST $KUBE_ROOT/_output \
+    release::gcs::bazel_push_build $GCS_DEST $LATEST $KUBE_ROOT/$OUTPUT_ROOT \
                                    $RELEASE_BUCKET && break
   else
     release::gcs::locally_stage_release_artifacts $GCS_DEST $LATEST \
-                                                  $KUBE_ROOT/_output \
+                                                  $KUBE_ROOT/$OUTPUT_ROOT \
                                                   $FLAGS_release_kind
     release::gcs::push_release_artifacts \
-     $KUBE_ROOT/_output/gcs-stage/$LATEST \
+     $KUBE_ROOT/$OUTPUT_ROOT/gcs-stage/$LATEST \
      gs://$RELEASE_BUCKET/$GCS_DEST/$LATEST && break
   fi
   ((attempt++))
@@ -216,7 +222,7 @@ if [[ -n "${FLAGS_docker_registry:-}" ]]; then
   # TODO: support Bazel too
   # Docker tags cannot contain '+'
   release::docker::release $FLAGS_docker_registry ${LATEST/+/_} \
-    $KUBE_ROOT/_output
+    $KUBE_ROOT/$OUTPUT_ROOT
 fi
 
 # If not --ci, then we're done here.
@@ -228,7 +234,7 @@ if ! ((FLAGS_noupdatelatest)); then
   ##############################################################################
   attempt=0
   while ((attempt<max_attempts)); do
-    release::gcs::publish_version $GCS_DEST $LATEST $KUBE_ROOT/_output \
+    release::gcs::publish_version $GCS_DEST $LATEST $KUBE_ROOT/$OUTPUT_ROOT \
                                   $RELEASE_BUCKET $GCS_EXTRA_PUBLISH_FILE && break
     ((attempt++))
   done
