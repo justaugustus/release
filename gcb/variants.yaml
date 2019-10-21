@@ -1,5 +1,11 @@
 variants:
   build-ci:
+    CI: '--ci'
+    NOMOCK: '--nomock'
+    ALLOW_DUP: '--allow-dup'
+    EXTRA_PUBLISH_FILE: '--extra-publish-file=k8s-master'
+    HYPERKUBE: '--hyperkube'
+  build-justaugustus:
     RELEASE_TOOL_REPO: 'https://github.com/justaugustus/release.git'
     RELEASE_TOOL_BRANCH: 'k8s-build'
     CI: '--ci'

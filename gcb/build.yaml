@@ -15,20 +15,19 @@ steps:
   - --branch=${_RELEASE_TOOL_BRANCH}
   - ${_RELEASE_TOOL_REPO}
 
-- name: 'gcr.io/$PROJECT_ID/k8s-gcb-base'
+- name: 'gcr.io/$PROJECT_ID/k8s-cloud-builder'
   dir: 'go/src/k8s.io/kubernetes'
   args:
   - make
   - clean
 
-- name: 'gcr.io/$PROJECT_ID/k8s-gcb-base'
+- name: 'gcr.io/$PROJECT_ID/k8s-cloud-builder'
   dir: 'go/src/k8s.io/kubernetes'
   args:
   - make
   - release-in-a-container
 
-# TODO: Need ['--nomock', '--verbose', '--ci']
-- name: 'gcr.io/$PROJECT_ID/k8s-gcb-base'
+- name: 'gcr.io/$PROJECT_ID/k8s-cloud-builder'
   dir: 'go/src/k8s.io/kubernetes'
   args:
   - ../release/push-build.sh
