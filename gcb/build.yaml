@@ -25,7 +25,7 @@ steps:
   dir: 'go/src/k8s.io/kubernetes'
   args:
   - make
-  - release-in-a-container
+  - "${_RELEASE_TYPE}"
 
 - name: 'gcr.io/$PROJECT_ID/k8s-cloud-builder'
   dir: 'go/src/k8s.io/kubernetes'
@@ -34,6 +34,8 @@ steps:
   - --verbose
   - "${_CI}"
   - "${_NOMOCK}"
+  - "${_BUCKET}"
+  - "${_REGISTRY}"
   - "${_ALLOW_DUP}"
   - "${_EXTRA_PUBLISH_FILE}"
   - "${_HYPERKUBE}"
@@ -47,8 +49,11 @@ substitutions:
   _KUBERNETES_BRANCH: 'master'
   _RELEASE_TOOL_REPO: 'https://github.com/kubernetes/release.git'
   _RELEASE_TOOL_BRANCH: 'master'
+  _RELEASE_TYPE: 'release-in-a-container'
   _CI: ''
   _NOMOCK: ''
+  _BUCKET: '--bucket=kubernetes-release-dev'
+  _REGISTRY: '--registry=gcr.io/kubernetes-ci-images'
   _ALLOW_DUP: ''
   _EXTRA_PUBLISH_FILE: ''
   _HYPERKUBE: ''

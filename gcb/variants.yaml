@@ -2,14 +2,35 @@ variants:
   build-ci:
     CI: '--ci'
     NOMOCK: '--nomock'
+    BUCKET: '--bucket=k8s-staging-release-test'
+    REGISTRY: '--docker-registry=gcr.io/k8s-staging-release-test'
     ALLOW_DUP: '--allow-dup'
     EXTRA_PUBLISH_FILE: '--extra-publish-file=k8s-master'
     HYPERKUBE: '--hyperkube'
-  build-justaugustus:
-    RELEASE_TOOL_REPO: 'https://github.com/justaugustus/release.git'
-    RELEASE_TOOL_BRANCH: 'k8s-build'
+  build-ci-fast:
     CI: '--ci'
     NOMOCK: '--nomock'
+    BUCKET: '--bucket=k8s-staging-release-test'
+    REGISTRY: '--docker-registry=gcr.io/k8s-staging-release-test'
+    ALLOW_DUP: '--allow-dup'
+  build-ci-old:
+    CI: '--ci'
+    NOMOCK: '--nomock'
+    BUCKET: '--bucket=kubernetes-release-dev'
+    REGISTRY: '--docker-registry=gcr.io/kubernetes-ci-images'
     ALLOW_DUP: '--allow-dup'
     EXTRA_PUBLISH_FILE: '--extra-publish-file=k8s-master'
     HYPERKUBE: '--hyperkube'
+  # TODO(justaugustus): Remove this variant once I complete testing
+  build-justaugustus:
+    RELEASE_TOOL_REPO: 'https://github.com/justaugustus/release.git'
+    RELEASE_TOOL_BRANCH: 'k8s-build-bak'
+    CI: '--ci'
+    NOMOCK: '--nomock'
+    BUCKET: '--bucket=kubernetes-release-dev'
+    # I don't want to push container images on my test runs
+    #REGISTRY: '--docker-registry=gcr.io/kubernetes-release-test'
+    ALLOW_DUP: '--allow-dup'
+    EXTRA_PUBLISH_FILE: '--extra-publish-file=k8s-master'
+    HYPERKUBE: '--hyperkube'
+  # TODO: Need to add a variant for build-ci-beta
