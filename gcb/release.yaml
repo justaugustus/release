@@ -42,6 +42,7 @@ steps:
   - "--gcb"
   - "--basedir=/workspace"
   - "--tmpdir=/workspace/tmp"
+  - "--verbose"
 
 tags:
 - ${_GCP_USER_TAG}

@@ -56,6 +56,7 @@ steps:
   - "--gcb"
   - "--basedir=/workspace"
   - "--tmpdir=/workspace/tmp"
+  - "--verbose"
 
 - name: k8s.gcr.io/kube-cross:local
   dir: "go/src/k8s.io/release"
@@ -76,6 +77,7 @@ steps:
   - "--gcb"
   - "--basedir=/workspace"
   - "--tmpdir=/workspace/tmp"
+  - "--verbose"
 
 - name: gcr.io/$PROJECT_ID/k8s-cloud-builder
   dir: "go/src/k8s.io/release"
@@ -97,6 +99,7 @@ steps:
   - "--gcb"
   - "--basedir=/workspace"
   - "--tmpdir=/workspace/tmp"
+  - "--verbose"
 
 tags:
 - ${_GCP_USER_TAG}
