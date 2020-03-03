@@ -69,9 +69,9 @@ PROG=${0##*/}
 #+     $PROG                     - Do a developer push
 #+     $PROG --nomock --federation --ci
 #+                               - Do a (non-mocked) CI push with federation
-#+     $PROG --bucket=kubernetes-release-$USER
+#+     $PROG --bucket=k8s-staging-release-test-$USER
 #+                               - Do a developer push to
-#+                                 kubernetes-release-$USER
+#+                                 k8s-staging-release-test-$USER
 #+
 #+ FILES
 #+
@@ -112,7 +112,7 @@ common::timestamp begin
 ###############################################################################
 # MAIN
 ###############################################################################
-RELEASE_BUCKET="${FLAGS_bucket:-"$CI_BUCKET"}"
+RELEASE_BUCKET="${FLAGS_bucket:-"$DEFAULT_BUCKET"}"
 
 # Compatibility with incoming global args
 [[ $KUBE_GCS_UPDATE_LATEST == "n" ]] && FLAGS_noupdatelatest=1
@@ -123,10 +123,10 @@ RELEASE_BUCKET="${FLAGS_bucket:-"$CI_BUCKET"}"
 # This will canonicalize the path
 KUBE_ROOT=$(pwd -P)
 
-# TODO: this should really just read the version from the release tarball always
 USE_BAZEL=false
 if release::was_built_with_bazel $KUBE_ROOT $FLAGS_release_kind; then
   USE_BAZEL=true
+  bazel build //:version
   LATEST=$(cat $KUBE_ROOT/bazel-genfiles/version)
 else
   LATEST=$(tar -O -xzf $KUBE_ROOT/_output/release-tars/$FLAGS_release_kind.tar.gz $FLAGS_release_kind/version)

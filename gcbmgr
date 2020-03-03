@@ -149,9 +149,8 @@ source $BASE_ROOT/lib/common.sh
 source $TOOL_LIB_PATH/gitlib.sh
 source $TOOL_LIB_PATH/releaselib.sh
 
-readonly TOOL_ORG="${TOOL_ORG:-kubernetes}"
-readonly TOOL_REPO="${TOOL_REPO:-release}"
-readonly TOOL_BRANCH="${TOOL_BRANCH:-master}"
+readonly RELEASE_TOOL_REPO="${RELEASE_TOOL_REPO:-https://github.com/kubernetes/release}"
+readonly RELEASE_TOOL_BRANCH="${RELEASE_TOOL_BRANCH:-master}"
 
 ###############################################################################
 # FUNCTIONS
@@ -294,18 +293,16 @@ submit_it () {
   substitutions="_OFFICIAL_TAG=$OFFICIAL_TAG,_NOMOCK_TAG=$NOMOCK_TAG,_RC_TAG=$RC_TAG"
   substitutions+=",_BUILD_POINT=$BUILD_POINT,_GCP_USER_TAG=$GCP_USER_TAG"
 
-  [[ $COMMAND == stage ]] && substitutions+=",_BUILD_AT_HEAD=$BUILD_AT_HEAD"
+  [[ $COMMAND == stage ]] && substitutions+=",_BUILD_AT_HEAD=$BUILD_AT_HEAD" && substitutions+=",_KUBE_CROSS_VERSION=$KUBE_CROSS_VERSION"
 
   # The usual suspects
   substitutions+=",_RELEASE_BRANCH=$RELEASE_BRANCH,_OFFICIAL=$OFFICIAL,_RC=$RC"
   substitutions+=",_NOMOCK=$NOMOCK,_BUILDVERSION=$BUILDVERSION"
-  substitutions+=",_TOOL_ORG=$TOOL_ORG"
-  substitutions+=",_TOOL_REPO=$TOOL_REPO"
-  substitutions+=",_TOOL_BRANCH=$TOOL_BRANCH"
-  substitutions+=",_KUBE_CROSS_VERSION=$KUBE_CROSS_VERSION"
+  substitutions+=",_RELEASE_TOOL_REPO=$RELEASE_TOOL_REPO"
+  substitutions+=",_RELEASE_TOOL_BRANCH=$RELEASE_TOOL_BRANCH"
 
   if ! JOB_DATA=$($GCLOUD builds submit --no-source \
-                          --config=$YAML_FILE $ASYNC --disk-size=$DISK_SIZE \
+                          --config=$YAML_FILE --async --disk-size=$DISK_SIZE \
                           --substitutions $substitutions 2>&1); then
     logecho "$FAILED: Job was not submitted.  Details:"
     logecho "$JOB_DATA"
@@ -336,9 +333,6 @@ release_it () {
     logecho "Branch not set.  Can't continue"
     return 1
   fi
-
-  KUBE_CROSS_VERSION="$( release::kubecross_version "$RELEASE_BRANCH" 'master' )" \
-    || common::exit 1 'Exiting...' >&2
 
   # Check for mandatory buildversion
   if [[ -z $FLAGS_buildversion ]]; then
@@ -412,12 +406,6 @@ GCP_USER_TAG=${GCP_USER_TAG/@/-at-}
 # GCP also doesn't like anything even remotely looking like a domain name
 # in the bucket name so convert . to -
 GCP_USER_TAG=${GCP_USER_TAG/\./-}
-
-if ((FLAGS_attended)); then
-  ASYNC=""
-else
-  ASYNC="--async"
-fi
 
 # A build cannot be a release candidate and official at the same time
 if ((FLAGS_official)) && ((FLAGS_rc)); then

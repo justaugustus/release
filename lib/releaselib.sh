@@ -18,22 +18,19 @@
 # CONSTANTS
 ###############################################################################
 
-readonly DEFAULT_PROJECT="kubernetes-release-test"
-readonly PROD_PROJECT="kubernetes-release"
+readonly DEFAULT_PROJECT="k8s-staging-release-test"
+# TODO(prototype): Temporarily setting this to the staging project to test
+#                  the staging flow with --nomock set.
+readonly PROD_PROJECT="k8s-staging-release-test"
 readonly TEST_PROJECT="${TEST_PROJECT:-${PROJECT_ID:-$DEFAULT_PROJECT}}"
+readonly OLD_PROJECT="kubernetes-release-test"
 
-readonly DEFAULT_BUCKET="kubernetes-release-gcb"
-readonly PROD_BUCKET="kubernetes-release"
-readonly TEST_BUCKET="kubernetes-release-gcb"
-readonly CI_BUCKET="kubernetes-release-dev"
-
-readonly KUBE_CROSS_REGISTRY="us.gcr.io/k8s-artifacts-prod/build-image"
-readonly KUBE_CROSS_IMAGE="${KUBE_CROSS_REGISTRY}/kube-cross"
-readonly KUBE_CROSS_CONFIG_LOCATION="build/build-image/cross"
-
-# Set a globally usable variable for the changelog directory since we've been
-# piecemeal search/replace-ing this and missing some cases.
-readonly CHANGELOG_DIR="CHANGELOG"
+readonly DEFAULT_BUCKET="k8s-staging-release-test"
+# TODO(prototype): Temporarily setting this to the staging project to test
+#                  the staging flow with --nomock set.
+readonly PROD_BUCKET="k8s-staging-release-test"
+readonly MOCK_BUCKET="k8s-staging-release-test"
+readonly OLD_BUCKET="kubernetes-release"
 
 ###############################################################################
 # FUNCTIONS
@@ -143,8 +140,6 @@ release::set_build_version () {
   local -a JOB
   local -a secondary_jobs
 
-  logecho "set_build_version args: $@"
-
   # Deal with somewhat inconsistent naming in config.yaml
   case $branch in
    master) branch="release-master"
@@ -189,19 +184,21 @@ release::set_build_version () {
   # Wait for background fetches.
   wait
 
-  # Get the longest line for formatting
-  max_job_length=$(echo ${secondary_jobs[*]/$job_prefix/} |\
+  if ((FLAGS_verbose)); then
+    # Get the longest line for formatting
+    max_job_length=$(echo ${secondary_jobs[*]/$job_prefix/} |\
      awk '{for (i=1;i<=NF;++i) {l=length($i);if(l>x) x=l}}END{print x}')
-  # Pad it a bit
-  ((max_job_length+2))
+    # Pad it a bit
+    ((max_job_length+2))
 
-  logecho
-  logecho "(*) Primary job (-) Secondary jobs"
-  logecho
-  logecho "  $(printf '%-'$max_job_length's' "Job #")" \
-          "Run #   Build # Time/Status"
-  logecho "= $(common::print_n_char = $max_job_length)" \
-          "=====   ======= ==========="
+    logecho
+    logecho "(*) Primary job (-) Secondary jobs"
+    logecho
+    logecho "  $(printf '%-'$max_job_length's' "Job #")" \
+            "Run #   Build # Time/Status"
+    logecho "= $(common::print_n_char = $max_job_length)" \
+            "=====   ======= ==========="
+  fi
 
   while read good_job; do
     ((good_job_count++))
@@ -279,24 +276,29 @@ release::set_build_version () {
     # Deal with far-behind secondary builds and just skip forward
     ((build_number>giveup_build_number)) && continue
 
-    logecho "* $(printf \
+    if ((FLAGS_verbose)); then
+      logecho "* $(printf \
                    '%-'$max_job_length's %-7s %-7s' \
                    ${main_job/$job_prefix/} \
                    \#$main_run \#$build_number) [$build_sha1_date]"
-    logecho "* (--buildversion=$build_version)"
+      logecho "* (--buildversion=$build_version)"
+    fi
 
     # Check secondaries to ensure that build number is green across "all"
     for other_job in ${secondary_jobs[@]}; do
-      logecho -n "- $(printf '%-'$max_job_length's ' \
+      ((FLAGS_verbose)) \
+       && logecho -n "- $(printf '%-'$max_job_length's ' \
                                  ${other_job/$job_prefix/})"
 
       # Need to kick out when a secondary doesn't exist (anymore)
       if [[ ! -f $job_path/$other_job ]]; then
-        logecho -r "Does not exist  SKIPPING"
+        ((FLAGS_verbose)) \
+         && logecho -r "Does not exist  SKIPPING"
         ((job_count++)) || true
         continue
       elif [[ $(wc -l <$job_path/$other_job) -lt 1 ]]; then
-        logecho -r "No Good Runs    ${TPUT[YELLOW]}SKIPPING${TPUT[OFF]}"
+        ((FLAGS_verbose)) \
+         && logecho -r "No Good Runs    ${TPUT[YELLOW]}SKIPPING${TPUT[OFF]}"
         ((job_count++)) || true
         continue
       fi
@@ -328,11 +330,13 @@ release::set_build_version () {
       done
 
       if [[ -n $run ]]; then
-        logecho "$(printf '%-7s %-7s' \#$run \#$cache_build) $PASSED"
+        ((FLAGS_verbose)) && \
+         logecho "$(printf '%-7s %-7s' \#$run \#$cache_build) $PASSED"
         ((job_count++)) || true
         continue
       else
-        logecho "$(printf '%-7s %-7s' -- --)" \
+        ((FLAGS_verbose)) && \
+         logecho "$(printf '%-7s %-7s' -- --)" \
                     "${TPUT[RED]}FAILED${TPUT[OFF]}"
         giveup_build_number=$build_number
         job_count=0
@@ -343,7 +347,7 @@ release::set_build_version () {
       fi
     done
 
-    logecho
+    ((FLAGS_verbose)) && logecho
     ((job_count>=${#secondary_jobs[@]})) && break
   done < $job_path/$main_job
 
@@ -354,7 +358,7 @@ release::set_build_version () {
     JENKINS_BUILD_VERSION=$build_version
   fi
 
-  logecho "JENKINS_BUILD_VERSION=$JENKINS_BUILD_VERSION"
+  ((FLAGS_verbose)) && logecho JENKINS_BUILD_VERSION=$JENKINS_BUILD_VERSION
 
   rm -rf $job_path
 
@@ -375,9 +379,6 @@ release::set_release_version () {
   local label
   declare -A release_branch build_version
   declare -Ag RELEASE_VERSION
-  declare -ag ORDERED_RELEASE_KEYS
-
-  logecho "set_release_version args: $@"
 
   if ! [[ $branch =~ $BRANCH_REGEX ]]; then
     logecho "Invalid branch format! $branch"
@@ -466,47 +467,12 @@ release::set_release_version () {
     RELEASE_VERSION_PRIME="${RELEASE_VERSION[alpha]}"
   fi
 
-  for label in ${!RELEASE_VERSION[@]}; do
+  if ((FLAGS_verbose)); then
+    for label in ${!RELEASE_VERSION[*]}; do
       logecho "RELEASE_VERSION[$label]=${RELEASE_VERSION[$label]}"
-  done
-  logecho "RELEASE_VERSION_PRIME=$RELEASE_VERSION_PRIME"
-
-  # To ensure we're executing releases in the correct order, we append the keys
-  # of the RELEASE_VERSION associative array in the order that we explicitly
-  # prefer: official, rc, beta, alpha
-  #
-  # In anago, we will then iterate over the keys in the ORDERED_RELEASE_KEYS
-  # array and where necessary use these elements to access the underlying values
-  # of the RELEASE_VERSION associative array.
-  #
-  # Example:
-  #
-  # for release_type in "${ORDERED_RELEASE_KEYS[@]}"; do
-  #  echo "Doing the $release stuff (${RELEASE_VERSION[$release_type]})"
-  # done
-  #
-  #
-  # More on manipulating associative arrays:
-  # https://www.gnu.org/savannah-checkouts/gnu/bash/manual/bash.html#Arrays
-
-  if [[ ${RELEASE_VERSION[official]} ]]; then
-    ORDERED_RELEASE_KEYS+=("official")
+    done
+    logecho "RELEASE_VERSION_PRIME=$RELEASE_VERSION_PRIME"
   fi
-
-  if [[ ${RELEASE_VERSION[rc]} ]]; then
-    ORDERED_RELEASE_KEYS+=("rc")
-  fi
-
-  if [[ ${RELEASE_VERSION[beta]} ]]; then
-    ORDERED_RELEASE_KEYS+=("beta")
-  fi
-
-  if [[ ${RELEASE_VERSION[alpha]} ]]; then
-    ORDERED_RELEASE_KEYS+=("alpha")
-  fi
-  for key in ${!ORDERED_RELEASE_KEYS[@]}; do
-      logecho "ORDERED_RELEASE_KEYS[$key]=${ORDERED_RELEASE_KEYS[$key]}"
-  done
 
   return 0
 }
@@ -962,9 +928,10 @@ release::gcs::publish () {
   local contents
   local public_link="https://storage.googleapis.com/$bucket/$publish_file"
 
-  if [[ "$bucket" == "$PROD_BUCKET" ]]; then
-    public_link="https://dl.k8s.io/$publish_file"
-  fi
+  # TODO(prototype): Uncomment this once dl.k8s.io is cut over to new prod.
+  #if [[ "$bucket" == "$PROD_BUCKET" ]]; then
+  #  public_link="https://dl.k8s.io/$publish_file"
+  #fi
 
   logrun mkdir -p "$release_stage/upload" || return 1
   echo "$version" > "$release_stage/upload/latest" || return 1
@@ -975,19 +942,6 @@ release::gcs::publish () {
     "$publish_file_dst" || return 1
 
   if ((FLAGS_nomock)) && ! ((FLAGS_private_bucket)); then
-    # New Kubernetes infra buckets, like k8s-staging-release-test, have a
-    # bucket-only ACL policy set, which means attempting to set the ACL on an
-    # object will fail. We should skip this ACL change in those instances, as
-    # new buckets already default to being publicly readable.
-    #
-    # Ref:
-    # - https://cloud.google.com/storage/docs/bucket-policy-only
-    # - https://github.com/kubernetes/release/issues/904
-    if [[ "$bucket" != "k8s-staging-release-test" ]]; then
-      logecho -n "Making uploaded version file public: "
-      logrun -s $GSUTIL acl ch -R -g all:R $publish_file_dst || return 1
-    fi
-
     # If public, validate public link
     logecho -n "* Validating uploaded version file at $public_link: "
     contents="$(curl --retry 5 -Ls $public_link)"
@@ -1298,8 +1252,17 @@ release::set_globals () {
     BUCKET_TYPE="release"
   fi
 
-  GCRIO_PATH_PROD="k8s.gcr.io"
-  GCRIO_PATH_PROD_PUSH="gcr.io/google-containers"
+  # Set GCR values
+  # The "production" GCR path is now multi-region alias
+  # TODO(prototype): Temporarily setting this to the staging project to test
+  #                  the staging flow with --nomock set.
+  #GCRIO_PATH_PROD="k8s.gcr.io"
+  GCRIO_PATH_PROD="gcr.io/$PROD_PROJECT"
+  # TODO(prototype): Temporarily setting this to the staging project to test
+  #                  the staging flow with --nomock set.
+  # TODO(prototype): Once access has been configured, we should set this to
+  #                  k8s-release-test-prod and test image promotion.
+  GCRIO_PATH_PROD_PUSH="gcr.io/$PROD_PROJECT"
   # The "test" GCR path
   GCRIO_PATH_TEST="gcr.io/$TEST_PROJECT"
 
@@ -1311,7 +1274,7 @@ release::set_globals () {
 
     GCRIO_PATH="${FLAGS_gcrio_path:-$GCRIO_PATH_PROD}"
   elif ((FLAGS_gcb)); then
-    RELEASE_BUCKET="$TEST_BUCKET"
+    RELEASE_BUCKET="$MOCK_BUCKET"
 
     # This is passed to logrun() where appropriate when we want to mock
     # specific activities like pushes
@@ -1327,7 +1290,7 @@ release::set_globals () {
     RELEASE_BUCKET_USER="${RELEASE_BUCKET_USER/\./-}"
     RELEASE_BUCKET="$RELEASE_BUCKET_USER"
 
-    READ_RELEASE_BUCKETS=("$TEST_BUCKET")
+    READ_RELEASE_BUCKETS=("$MOCK_BUCKET")
 
     # This is passed to logrun() where appropriate when we want to mock
     # specific activities like pushes

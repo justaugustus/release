@@ -119,7 +119,7 @@ PROG=${0##*/}
 #+                                 build version
 #+     [--gcrio_path=]           - Specify the full GCR path to use.
 #+                                 defaults:
-#+                                 - gcr.io/kubernetes-release-test (mock)
+#+                                 - gcr.io/k8s-staging-release-test (mock)
 #+                                 - k8s.gcr.io for --nomock
 #+     [--basedir=dir]           - Specify an alternate base directory
 #+                                 (default: $HOME/anago)
@@ -277,12 +277,7 @@ ensure_registry_acls () {
   # Short of creating a hardcoded map of project-id to registry, translating
   # _ to - seems to be a simple rule to keep this, well, simple.
   for r in ${registries[*]//_/-}; do
-    # In this context, "google-containers" is still used
-    if [[ "$r" == "$GCRIO_PATH_PROD" ]]; then
-      artifact_namespace="google-containers"
-    else
-      artifact_namespace="${r/gcr.io\//}"
-    fi
+    artifact_namespace="${r/gcr.io\//}"
 
     gs_path="gs://artifacts.$artifact_namespace.appspot.com/containers"
     logecho -n "Checking write access to registry $r: "
@@ -395,36 +390,109 @@ check_prerequisites () {
   for rb in ${WRITE_RELEASE_BUCKETS[*]}; do
     release::gcs::check_release_bucket $rb || return 1
   done
-
-  logecho -n "Checking the availability of krel: "
-  logrun -v -s krel version || return 1
 }
 
 ###############################################################################
-# Update $CHANGELOG_FILEPATH on master
+# Updates openapi-spec version files
+# Uses the RELEASE_VERSION global dict
+# @param label - label index to RELEASE_VERSION
+rev_openapi_versions () {
+  local label=$1
+  local -a swagger_files=("api/openapi-spec/swagger.json"
+                          "federation/apis/openapi-spec/swagger.json")
+  local f
+
+  #########################################################################
+  # NOTE: To avoid a significant time sink from running update-all.sh as
+  #       well as avoiding running the master-only doc stub creator
+  #       update-generated-docs.sh, we simply and quickly modify the files that
+  #       are dependent on a $version_file change
+  #       If/when the great update-all.sh revolution occurs and this runs in
+  #       under a minute, we can probably run that instead.
+  #########################################################################
+  for f in ${swagger_files[*]}; do
+    # Handle the recent move of federation out of k/k
+    if [[ ! -f $f ]]; then
+      logecho "Skipping $f..."
+      continue
+    fi
+    # Strip any suffix off incoming RELEASE_VERSION[$label]
+    sed -i -r 's,"version": "'${VER_REGEX[release]}'","version": "'${RELEASE_VERSION[$label]//-*}'",g' $f
+    logrun git add $f
+  done
+
+  # Only commit if the files have changed.
+  if [[ -n "$(git status -s)" ]]; then
+    logecho -n "Committing openapi-spec versioned files: "
+    logrun -s git commit -am \
+                "Kubernetes version ${RELEASE_VERSION[$label]} openapi-spec file updates"
+  fi
+}
+
+###############################################################################
+# Update $CHANGELOG_FILE on master
 PROGSTEP[generate_release_notes]="GENERATE RELEASE NOTES"
 generate_release_notes () {
   local release_tars=$TREE_ROOT/_output-$RELEASE_VERSION_PRIME/release-tars
-  local git_status_output
-  local repo_state
+  local action="Update"
 
-  logrun -v krel changelog \
-    --repo "$TREE_ROOT" \
-    --branch="${PARENT_BRANCH:-$RELEASE_BRANCH}" \
-    --tars "$release_tars" \
-    --tag "$RELEASE_VERSION_PRIME" \
-    --html-file "$RELEASE_NOTES_HTML" \
-    --bucket="$RELEASE_BUCKET" \
-    || return 1
+  logecho -n "Generating release notes: "
+  logrun -s relnotes $RELEASE_VERSION_PRIME --release-tars=$release_tars \
+                     --branch=${PARENT_BRANCH:-$RELEASE_BRANCH} --htmlize-md \
+                     --markdown-file=$RELEASE_NOTES_MD \
+                     --html-file=$RELEASE_NOTES_HTML \
+                     --release-bucket=$RELEASE_BUCKET || return 1
 
-  git_status_output=$(git status -s)
-  repo_state=$([[ -z $git_status_output ]] || echo "dirty")
+  logecho -n "Checkout master branch to make changes: "
+  logrun -s git checkout master || return 1
 
-  if [[ $repo_state == "dirty" ]]; then
-    logecho "Repo state was dirty after generating release notes. Cannot continue."
-    logecho "'git status -s' output:"
-    logecho "$git_status_output"
-    return 1
+  # The fetch and rebase before editing $CHANGELOG_FILE
+  # avoids merge conflicts if another release cut
+  # completed while we were building this one.
+  logecho -n "Fetch origin/master to get latest $CHANGELOG_FILE: "
+  logrun -s git fetch origin master || return 1
+  logecho -n "Rebase on origin/master before editing $CHANGELOG_FILE: "
+  logrun -s git rebase origin/master || return 1
+
+  if [[ ! -f $CHANGELOG_FILE ]]; then
+    cat<<EOF > $CHANGELOG_FILE
+<!-- BEGIN MUNGE: GENERATED_TOC -->
+
+<!-- END MUNGE: GENERATED_TOC -->
+
+<!-- NEW RELEASE NOTES ENTRY -->
+EOF
+    action="Add"
+    logecho -n "$CHANGELOG_FILE not found.  Creating: "
+    logrun -s git add $CHANGELOG_FILE
+  fi
+
+  logecho -n "Insert $RELEASE_VERSION_PRIME notes into $CHANGELOG_FILE: "
+  # Pipe to logrun() vs using directly, because quoting.
+  sed -i -e 's/<!-- NEW RELEASE NOTES ENTRY -->/&\n/' \
+         -e "/<!-- NEW RELEASE NOTES ENTRY -->/r $RELEASE_NOTES_MD" \
+   $CHANGELOG_FILE | logrun -s
+
+  logecho -n "Update $CHANGELOG_FILE TOC: "
+  logrun -s common::mdtoc $CHANGELOG_FILE || return 1
+
+  logecho -n "Committing $CHANGELOG_FILE: "
+  logrun -s git commit -am \
+            "$action $CHANGELOG_FILE for $RELEASE_VERSION_PRIME." \
+   || return 1
+
+  # Sync $CHANGELOG_FILE to release-* branch and clear all others
+  if [[ "$RELEASE_BRANCH" =~ release- ]]; then
+    logecho -n "Checkout $RELEASE_BRANCH branch to make changes: "
+    logrun -s git checkout $RELEASE_BRANCH || return 1
+    logecho -n "Remove any previous CHANGELOG-*.md files: "
+    logrun -s git rm -f CHANGELOG-*.md || return 1
+    logecho -n "Copy master $CHANGELOG_FILE to $RELEASE_BRANCH branch: "
+    logrun -s git checkout master -- $CHANGELOG_FILE || return 1
+    logecho -n "Committing $CHANGELOG_FILE: "
+    logrun -s git commit -am \
+              "Add/Update $CHANGELOG_FILE for $RELEASE_VERSION_PRIME." \
+     || return 1
   fi
 }
 
@@ -523,6 +591,25 @@ checkout_object () {
 }
 
 ##############################################################################
+# Commit a tag with a comment to the current HEAD of a branch
+# @param label - The label to process
+# @param branch - The branch to process
+git_tag () {
+  local label=$1
+  local branch=$2
+  local commit_string
+  local label_common="$label"
+
+  # Ensure a common name for label in case we're using the special beta indexes
+  [[ "$label" =~ ^beta ]] && label_common="beta"
+
+  # Tagging
+  commit_string="Kubernetes $label_common release ${RELEASE_VERSION[$label]}"
+  logecho -n "Tagging $commit_string on $branch: "
+  logrun -s git tag -a -m "$commit_string" "${RELEASE_VERSION[$label]}"
+}
+
+##############################################################################
 # Tag/Build a local kube_cross image based on the version in scope
 PROGSTEP[local_kube_cross]="TAG/BUILD LOCAL KUBE CROSS"
 local_kube_cross () {
@@ -531,8 +618,8 @@ local_kube_cross () {
   local local_image
   local docker_image
 
-  docker_image="${KUBE_CROSS_IMAGE}"
-  version="$(cat "${TREE_ROOT}/${KUBE_CROSS_CONFIG_LOCATION}/VERSION")"
+  docker_image="${GCRIO_PATH_TEST}/kube-cross"
+  version="$(cat "${TREE_ROOT}/build/build-image/cross/VERSION")"
   image="${docker_image}:${version}"
   local_image="${docker_image}:local"
 
@@ -543,20 +630,20 @@ local_kube_cross () {
   else
     logecho -n "Building docker image ${image}: "
     logrun -s docker build --cache-from "$docker_image" -t "$image" \
-                           -t "$local_image" "${TREE_ROOT}/${KUBE_CROSS_CONFIG_LOCATION}/"
+                           -t "$local_image" "${TREE_ROOT}/build/build-image/cross/"
   fi
 }
 
 ##############################################################################
 # Prepare sources for building for a given label
-# @param label - The label to process (eg: "beta" or "official")
+# @param label - The label to process
 PROGSTEP[prepare_tree]="PREPARE AND TAG TREE"
 prepare_tree () {
   local label=$1
   local label_common="$label"
   local branch
-  local commit_string
 
+  # Check for tag first
   if git rev-parse "${RELEASE_VERSION[$label]}" >/dev/null 2>&1; then
     logecho "The ${RELEASE_VERSION[$label]} tag already exists!"
     logecho "Possible reasons for this:"
@@ -570,57 +657,53 @@ prepare_tree () {
   # Now set the branch we're on
   branch=$(gitlib::current_branch)
 
-  # Clear all CHANGELOG-N.NN.md files on the branch and insert the
-  # generated one, if # $PARENT_BRANCH==master, which seems to be in the
-  # weeks between branch creation the first official release of the branch.
-  # TODO: can this condition on whether the branch is "beta" or "rc" and be
-  # more simply readable to a maintainer?
+  # If this is a new branch, rev openapi-spec version files
+  # Because this modifies files on master and there's a good chance the
+  # master has moved ahead by now, the tag has to occur before this file
+  # change or the later rebase in gitlib::push_master() will rewrite the
+  # commit associated with the tag and orphan it.
+  if [[ -n "$PARENT_BRANCH" && $label == alpha ]]; then
+    git_tag $label $branch || return 1
+    rev_openapi_versions $label || return 1
+    return 0
+  fi
+
+  # rev openapi-spec version files on branch for beta tags
+  case $label in
+    beta*) rev_openapi_versions $label || return 1 ;;
+  esac
+
+  # COMMENTING OUT FOR NOW AS THE WAY FORWARD IS NOT CLEAR
+  # generate docs on new branches (from master) only
+  # If the entirety of this session is based on a branch from master
+  # (PARENT_BRANCH), and this iteration of prepare_tree() is operating on
+  # the NON-master branch itself, versionize the docs
+  #if [[ "$PARENT_BRANCH" == "master" && "$branch" != "master" ]]; then
+  #  logecho -n "Generating docs for ${RELEASE_VERSION[$label]}: "
+  #  logrun -s $TREE_ROOT/hack/generate-docs.sh || return 1
+  #  logecho -n "Committing: "
+  #  logrun -s git commit -am \
+  #            "Generating docs for ${RELEASE_VERSION[$label]} on $branch."
+  #fi
+
+  # Clear all CHANGELOG-N.NN.md files on the branch.
+  # This replaces the above commented out change to the branch.
+  # Some unique change is required on the branch to allow it to be git
+  # describe'd as something other than the current tag on master
+  # If/when the generate-docs.sh issue is sorted out, this will become
+  # optional, though probably still useful anyway.
   if [[ "$PARENT_BRANCH" == "master" && "$branch" != "master" ]]; then
     logecho -n "Remove any previous CHANGELOG-*.md files: "
-    logrun -s git rm -f "$CHANGELOG_DIR"/CHANGELOG-*.md || return 1
-    logecho -n "Copy master $CHANGELOG_FILEPATH to $branch branch: "
-    logrun -s git checkout master -- $CHANGELOG_FILEPATH || return 1
+    logrun -s git rm -f CHANGELOG-*.md || return 1
+    logecho -n "Copy master $CHANGELOG_FILE to $branch branch: "
+    logrun -s git checkout master -- $CHANGELOG_FILE || return 1
     logecho -n "Committing deleted CHANGELOG-*.md files: "
-    logrun -s git commit -am "Delete extraneous CHANGELOG-*.md files on branch." || return 1
+    logrun -s git commit -am \
+              "Delete extraneous CHANGELOG-*.md files on branch." \
+     || return 1
   fi
 
-  # This appears to be a bug fix for some historical bug.  Unclear if/why
-  # this would ever result in label != label_common.
-  # Ensure a common name for label in case we're using the special beta indexes
-  [[ "$label" =~ ^beta ]] && label_common="beta"
-
-  # For release branches, we create an empty release commit to avoid potential
-  # ambiguous 'git describe' logic between the official release, 'x.y.z' and the
-  # next beta of that release branch, 'x.y.(z+1)-beta.0'.
-  #
-  # We avoid doing this empty release commit on 'master', as:
-  #   - there is a potential for branch conflicts as upstream/master moves ahead
-  #   - we're checking out a git ref, as opposed to a branch, which means the tag
-  #     will detached from 'upstream/master'
-  #
-  # A side-effect of the tag being detached from 'master' is the primary build job
-  # (ci-kubernetes-build) will build as the previous alpha, instead of the assumed
-  # tag. This causes the next anago run against 'master' to fail due to an old
-  # build version.
-  #
-  # Example: 'v1.18.0-alpha.2.663+df908c3aad70be' 
-  #          (should instead be 'v1.18.0-alpha.3.<commits-since-tag>+<commit-ish>') 
-  #
-  # ref:
-  #   - https://github.com/kubernetes/release/issues/1020
-  #   - https://github.com/kubernetes/release/pull/1030
-  #   - https://github.com/kubernetes/release/issues/1080
-  #   - https://github.com/kubernetes/kubernetes/pull/88074
-  if [[ "$branch" =~ ^release- ]]; then
-    logecho "Creating an empty release commit for tag ${RELEASE_VERSION[$label]}"
-    logrun git commit --allow-empty -m "Release commit for Kubernetes ${RELEASE_VERSION[$label]}" \
-      || return 1
-  fi
-
-  # Tagging
-  commit_string="Kubernetes $label_common release ${RELEASE_VERSION[$label]}"
-  logecho -n "Tagging $commit_string on $branch: "
-  logrun -s git tag -a -m "$commit_string" "${RELEASE_VERSION[$label]}" || return 1
+  git_tag $label $branch
 }
 
 ##############################################################################
@@ -781,7 +864,6 @@ found_staged_location () {
     gs_stage_root="gs://$bucket/stage/$jbv/$version"
     if ! binary_artifacts_exist $gs_stage_root $version; then
       # Ensure these are unset in this case
-      logecho "unsetting STAGED_LOCATION STAGED_BUCKET"
       unset STAGED_LOCATION STAGED_BUCKET
       return 1
     fi
@@ -860,9 +942,9 @@ push_git_objects () {
   logrun -s git checkout master || return 1
 
   logecho "Pushing$dryrun_flag tags"
-  for release_type in "${ORDERED_RELEASE_KEYS[@]}"; do
-    logecho -n "Pushing ${RELEASE_VERSION[$release_type]} tag: "
-    logrun -s git push$dryrun_flag origin ${RELEASE_VERSION[$release_type]} || return 1
+  for b in ${!RELEASE_VERSION[@]}; do
+    logecho -n "* ${RELEASE_VERSION[$b]}: "
+    logrun -s git push$dryrun_flag origin ${RELEASE_VERSION[$b]} || return 1
   done
 
   if [[ "$RELEASE_BRANCH" =~ release- ]]; then
@@ -876,7 +958,7 @@ push_git_objects () {
   fi
 
   # For files created on master with new branches and
-  # for $CHANGELOG_FILEPATH, update the master
+  # for $CHANGELOG_FILE, update the master
   gitlib::push_master
 }
 
@@ -884,13 +966,13 @@ push_git_objects () {
 # generate the announcement text to be mailed and published
 branch_announcement_text () {
   cat <<EOF
-Kubernetes Community,
+Kubernetes team,
 <P>
 Kubernetes' $RELEASE_BRANCH branch has been created.
 <P>
 The release owner will be sending updates on how to interact with this branch shortly.  The <A HREF=https://git.k8s.io/community/contributors/devel/sig-release/cherry-picks.md>Cherrypick Guide</A> has some general guidance on how things will proceed.
 <P>
-Announced by your <A HREF=https://git.k8s.io/sig-release/release-managers.md>Kubernetes Release Managers</A>.
+Announced by <A HREF=https://github.com/kubernetes/release>$PROG</A>, the Kubernetes Release Tool
 EOF
 }
 
@@ -898,19 +980,19 @@ EOF
 # generate the announcement text to be mailed and published
 release_announcement_text () {
   cat <<EOF
-Kubernetes Community,
+Kubernetes team,
 <P>
 Kubernetes $RELEASE_VERSION_PRIME has been built and pushed.
 <P>
-The release notes have been updated in <A HREF=https://git.k8s.io/kubernetes/$CHANGELOG_FILEPATH/#${RELEASE_VERSION_PRIME//\./}>$CHANGELOG_FILE</A>, with a pointer to them on <A HREF=https://github.com/kubernetes/kubernetes/releases/tag/$RELEASE_VERSION_PRIME>github</A>:
+The release notes have been updated in <A HREF=https://github.com/kubernetes/kubernetes/blob/master/$CHANGELOG_FILE/#${RELEASE_VERSION_PRIME//\./}>$CHANGELOG_FILE</A> with a pointer to it on <A HREF=https://github.com/kubernetes/kubernetes/releases/tag/$RELEASE_VERSION_PRIME>github</A>:
 <P>
 <HR>
 $(cat $RELEASE_NOTES_HTML)
 <HR>
 <P><BR>
-Contributors, the <A HREF=https://git.k8s.io/kubernetes/$CHANGELOG_FILEPATH/#${RELEASE_VERSION_PRIME//\./}>$CHANGELOG_FILE</A> has been bootstrapped with $RELEASE_VERSION_PRIME release notes and you may edit now as needed.
-<P><BR><BR>
-Published by your <A HREF=https://git.k8s.io/sig-release/release-managers.md>Kubernetes Release Managers</A>.
+Leads, the <A HREF=https://github.com/kubernetes/kubernetes/blob/master/$CHANGELOG_FILE/#${RELEASE_VERSION_PRIME//\./}>$CHANGELOG_FILE</A> has been bootstrapped with $RELEASE_VERSION_PRIME release notes and you may edit now as needed.
+<P><BR>
+Published by <A HREF=https://github.com/kubernetes/release>$PROG</A>, the Kubernetes Release Tool
 EOF
 }
 
@@ -929,9 +1011,8 @@ announce () {
   logecho "Creating k8s ${RELEASE_VERSION_PRIME} announcement in ${WORKDIR} ..."
 
   if [[ "$arg" == "--branch" ]]; then
-    echo "Kubernetes ${RELEASE_BRANCH} branch has been created" > "$subject_file"
+    echo "k8s ${RELEASE_BRANCH} branch has been created" > "$subject_file"
     branch_announcement_text > "$announcement_file"
-    logecho "Kubernetes ${RELEASE_BRANCH} branch creation announcement created."
 
     # When we create a new branch, we notify the publishing-bot folks by
     # creating an issue for them
@@ -942,9 +1023,8 @@ announce () {
       logecho "${OK}: publishing-bot update issue created: ${pubotIssue}"
     fi
   else
-    echo "Kubernetes ${RELEASE_VERSION_PRIME} is live!" > "$subject_file"
+    echo "k8s ${RELEASE_VERSION_PRIME} is live!" > "$subject_file"
     release_announcement_text > "$announcement_file"
-    logecho "Kubernetes ${RELEASE_VERSION_PRIME} release announcement created."
   fi
 
   # Only send from desktop
@@ -1051,7 +1131,7 @@ update_github_release () {
 
   # post release data
   logecho "$release_verb the $RELEASE_VERSION_PRIME release on github..."
-  local changelog_url="$K8S_GITHUB_URL/blob/master/$CHANGELOG_FILEPATH"
+  local changelog_url="$K8S_GITHUB_URL/blob/master/$CHANGELOG_FILE"
   query_tmpl='{
     "tag_name" : $tag,
     "target_commitish": $target,
@@ -1068,9 +1148,9 @@ SHA512 for `kubernetes.tar.gz`: `%s`
 Additional binary downloads are linked in the [%s](%s).'
   body="$(
     printf "$body_fmt" \
-      "$CHANGELOG_FILEPATH" "${changelog_url}#${RELEASE_VERSION_PRIME//\./}" \
+      "$CHANGELOG_FILE" "${changelog_url}#${RELEASE_VERSION_PRIME//\./}" \
       "$sha256_hash" "$sha512_hash" \
-      "$CHANGELOG_FILEPATH" "${changelog_url}#downloads-for-${RELEASE_VERSION_PRIME//\./}"
+      "$CHANGELOG_FILE" "${changelog_url}#downloads-for-${RELEASE_VERSION_PRIME//\./}"
   )"
   query_body="$( jq \
     --arg tag "$RELEASE_VERSION_PRIME" \
@@ -1150,10 +1230,10 @@ Additional binary downloads are linked in the [%s](%s).'
 ##############################################################################
 # When creating new alphas on the master branch, make sure that X.Y-1.0
 # has been created first or warn.
-# This is to ensure that `krel ff` can continue to be used as needed.  User
+# This is to ensure that branchff can continue to be used as needed.  User
 # can override here.
 # @param buildver - Incoming JENKINS_BUILD_VERSION
-fastforward_check () {
+branchff_sanity_check () {
   local buildver=$1
   local latest_official
 
@@ -1199,7 +1279,6 @@ get_build_candidate () {
 
   # Are we branching to a new branch?
   if gitlib::branch_exists $RELEASE_BRANCH; then
-    logecho "RELEASE_BRANCH==$RELEASE_BRANCH already exists"
     # If the branch is a 3-part branch (ie. release-1.2.3)
     if [[ $RELEASE_BRANCH =~ $BRANCH_REGEX ]] && \
        [[ -n ${BASH_REMATCH[4]} ]]; then
@@ -1212,7 +1291,6 @@ get_build_candidate () {
     fi
     testing_branch=$RELEASE_BRANCH
   else
-    logecho "RELEASE_BRANCH==$RELEASE_BRANCH does not yet exist"
     [[ $RELEASE_BRANCH =~ $BRANCH_REGEX ]]
 
     # Not a 3-part branch
@@ -1235,15 +1313,10 @@ get_build_candidate () {
     fi
   fi
 
-  logecho "PARENT_BRANCH set to $PARENT_BRANCH"
-  logecho "BRANCH_POINT set to $BRANCH_POINT"
-  logecho "testing_branch set to $testing_branch"
-
   if [[ -z $BRANCH_POINT ]]; then
     if [[ -n "$FLAGS_buildversion" ]]; then
       logecho -r "$ATTENTION: Using --buildversion=$FLAGS_buildversion"
       JENKINS_BUILD_VERSION="$FLAGS_buildversion"
-      logecho "JENKINS_BUILD_VERSION set to $JENKINS_BUILD_VERSION"
     else
       logecho "Asking Jenkins for a good build (this may take some time)..."
       FLAGS_verbose=1 release::set_build_version \
@@ -1260,7 +1333,7 @@ get_build_candidate () {
     fi
 
     # Check state of master branch before continuing
-    fastforward_check $JENKINS_BUILD_VERSION
+    branchff_sanity_check $JENKINS_BUILD_VERSION
   else
     # The build version should never be behind HEAD on release existing branches
     if [[ "$RELEASE_BRANCH" =~ release-([0-9]{1,})\. ]]; then
@@ -1382,11 +1455,6 @@ archive_release () {
   # Best effort
   logecho "Copy $WORKDIR $text to $archive_bucket/$build_dir..."
   logrun $GSUTIL -mq cp $dash_args $WORKDIR/* $archive_bucket/$build_dir || true
-
-  logecho -n "Ensure PRIVATE ACL on" \
-             "$archive_bucket/$build_dir/${LOGFILE##*/}\*: "
-  logrun -s $GSUTIL acl ch -d AllUsers \
-            "$archive_bucket/$build_dir/${LOGFILE##*/}*" || true
 }
 
 ##############################################################################
@@ -1465,18 +1533,8 @@ if [[ -z "${BASEDIR}" ]]; then
   BASEDIR="$HOME/anago"
 fi
 
-BINDIR="$BASEDIR/bin"
-
-if [[ -z "$BINDIR" ]]; then
-  logrun -v mkdir -p "$BINDIR"
-fi
-
 # make sure we have the compiled bins in the path
-export PATH="$PATH:$BINDIR"
-logecho "PATH: $PATH"
-
-# List binaries
-logrun -v ls -al "$BINDIR"
+export PATH="${PATH}:${BASEDIR}/bin"
 
 ##############################################################################
 # Initialize logs
@@ -1596,21 +1654,19 @@ fi
 
 if [[ $RELEASE_VERSION_PRIME =~ ${VER_REGEX[release]} ]]; then
   CHANGELOG_FILE="CHANGELOG-${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.md"
-  CHANGELOG_FILEPATH="$CHANGELOG_DIR/$CHANGELOG_FILE"
 else
   common::exit 1 "Unable to set CHANGELOG file!"
 fi
 
 # Go tools expect the kubernetes src to be under $GOPATH
-export GOPATH="$WORKDIR"
-logecho "GOPATH: $GOPATH"
-
+export GOPATH=$WORKDIR
 # TOOL_ROOT is release/
 # TREE_ROOT is working branch/tree
 TREE_ROOT=$WORKDIR/src/k8s.io/kubernetes
 # Same as Makefile variable name
 OUT_DIR="_output"
 BUILD_OUTPUT=$TREE_ROOT/$OUT_DIR
+RELEASE_NOTES_MD=$WORKDIR/src/release-notes.md
 RELEASE_NOTES_HTML=$WORKDIR/src/release-notes.html
 
 # Ensure the WORKDIR exists
@@ -1651,7 +1707,7 @@ common::printvars -p WORKDIR WORKDIR TREE_ROOT $DISPLAY_PARENT_BRANCH \
                      $DISPLAY_VERSION \
                      RELEASE_VERSION_PRIME ${ALL_RELEASE_VERSIONS[@]} \
                      RELEASE_BRANCH GCRIO_PATH RELEASE_BUCKET BUCKET_TYPE \
-                     CHANGELOG_FILEPATH \
+                     CHANGELOG_FILE \
                      FLAGS_nomock FLAGS_rc FLAGS_official \
                      LOGFILE
 
@@ -1699,9 +1755,8 @@ if ! ((FLAGS_stage)); then
 fi
 
 if [[ -z $STAGED_LOCATION ]]; then
-  logecho "STAGED_LOCATION:=$STAGED_LOCATION, beginning prebuild"
   # Iterate over session release versions for setup, tagging and building
-  for label in "${ORDERED_RELEASE_KEYS[@]}"; do
+  for label in ${!RELEASE_VERSION[@]}; do
     common::run_stateful "prepare_tree $label" RELEASE_VERSION[$label]
     # This doesn't have to be done per label, but does need to be inserted
     # after an initial prepare_tree(), so just let the statefulness of it
@@ -1734,7 +1789,7 @@ if [[ -z $STAGED_LOCATION ]]; then
   # Complete the "build" for the gcb case
   if ((FLAGS_gcb)); then
     if ((FLAGS_stage)); then
-      for label in "${ORDERED_RELEASE_KEYS[@]}"; do
+      for label in ${!RELEASE_VERSION[@]}; do
         common::run_stateful "build_tree $label" RELEASE_VERSION[$label]
       done
     fi
@@ -1743,9 +1798,9 @@ if [[ -z $STAGED_LOCATION ]]; then
   # No release notes for X.Y.Z-beta.0 releases
   [[ -z "$PARENT_BRANCH" ]] && common::run_stateful generate_release_notes
 else
-  logecho "STAGED_LOCATION undefined, attempting completion"
+  logecho
   # Force complete for these three stages
-  for label in "${ORDERED_RELEASE_KEYS[@]}"; do
+  for label in ${!RELEASE_VERSION[@]}; do
     SKIP_STEPS+=(prepare_tree+$label build_tree+$label)
     ((FLAGS_gcb)) && SKIP_STEPS+=(local_kube_cross make_cross+$label)
   done
@@ -1766,7 +1821,7 @@ else
 fi
 
 # Push for each release version of this session
-for label in "${ORDERED_RELEASE_KEYS[@]}"; do
+for label in ${!RELEASE_VERSION[@]}; do
   common::run_stateful "push_all_artifacts $label" RELEASE_VERSION[$label]
 done
 
